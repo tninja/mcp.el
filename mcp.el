@@ -934,16 +934,21 @@ Returns a list of parsed argument plists."
 RES is a plist representing the tool call result.
 
 The function extracts text content from the result, concatenating it into
-a single string if multiple text entries are present.
+a single string if multiple text entries are present.  When the result
+indicates an error (\\=`:isError' is non-nil), the returned string is
+prefixed with an error marker so callers can surface it to the user.
 
 Returns the concatenated text or nil if no text content is found."
-  (string-join
-   (cl-remove-if #'null
-                 (mapcar (lambda (content)
-                           (when (string= "text" (plist-get content :type))
-                             (plist-get content :text)))
-                         (plist-get res :content)))
-   "\n"))
+  (let ((text (string-join
+               (cl-remove-if #'null
+                             (mapcar (lambda (content)
+                                       (when (string= "text" (plist-get content :type))
+                                         (plist-get content :text)))
+                                     (plist-get res :content)))
+               "\n")))
+    (if (plist-get res :isError)
+        (format "Tool error: %s" text)
+      text)))
 
 (defun mcp--generate-tool-call-args (args properties)
   "Generate tool call arguments from ARGS and PROPERTIES.
@@ -970,6 +975,20 @@ Returns a plist of argument names and values ready for tool invocation."
                               (when (> need-length 0)
                                 (make-list need-length nil)))))))
 
+(defun mcp--server-not-connected-message (name)
+  "Return a detailed error message when server NAME is not connected.
+Includes server stderr output when available to aid debugging."
+  (let* ((stderr-buf (get-buffer (format "*%s stderr*" name)))
+         (stderr-output (when stderr-buf
+                          (with-current-buffer stderr-buf
+                            (let ((s (buffer-string)))
+                              (unless (string-empty-p (string-trim s))
+                                (string-trim s)))))))
+    (if stderr-output
+        (format "Error: %s server not connected\nServer error output:\n%s"
+                name stderr-output)
+      (format "Error: %s server not connected" name))))
+
 ;;;###autoload
 (defun mcp-make-text-tool (name tool-name &optional asyncp)
   "Create a `gptel' tool with the given NAME, TOOL-NAME, and ASYNCP.
@@ -994,19 +1013,24 @@ the response to extract and return text content."
                          (when (< (length args) (length required))
                            (error "Error: args not match: %s -> %s" required args))
                          (if-let* ((connection (gethash name mcp-server-connections)))
-                             (mcp-async-call-tool connection
-                                                  tool-name
-                                                  (mcp--generate-tool-call-args args properties)
-                                                  (lambda (res)
-                                                    (funcall callback
-                                                             (mcp--parse-tool-call-result res)))
-                                                  (lambda (code message)
-                                                    (funcall callback
-                                                             (format "call %s tool error with %s: %s"
-                                                                     tool-name
-                                                                     code
-                                                                     message))))
-                           (error "Error: %s server not connect" name)))
+                             (condition-case err
+                                 (mcp-async-call-tool connection
+                                                      tool-name
+                                                      (mcp--generate-tool-call-args args properties)
+                                                      (lambda (res)
+                                                        (funcall callback
+                                                                 (mcp--parse-tool-call-result res)))
+                                                      (lambda (code message)
+                                                        (funcall callback
+                                                                 (format "call %s tool error with %s: %s"
+                                                                         tool-name
+                                                                         code
+                                                                         message))))
+                               (error
+                                (funcall callback
+                                         (format "Error: call %s tool failed: %s"
+                                                 tool-name (error-message-string err)))))
+                           (funcall callback (mcp--server-not-connected-message name))))
                      (lambda (&rest args)
                        (when (< (length args) (length required))
                          (error "Error: args not match: %s -> %s" required args))
@@ -1016,7 +1040,7 @@ the response to extract and return text content."
                                                          (mcp--generate-tool-call-args args properties))))
                                (mcp--parse-tool-call-result res)
                              (error "Error: call %s tool error" tool-name))
-                         (error "Error: %s server not connect" name))))
+                         (error "%s" (mcp--server-not-connected-message name)))))
          :name tool-name
          :async asyncp
          :description description
@@ -1277,8 +1301,11 @@ ERROR-CALLBACK is a function to call on error."
                          (lambda (res)
                            (funcall callback res))
                          :error-fn
-                         (jsonrpc-lambda (&key code message _data)
-                           (funcall error-callback code message))))
+                         (jsonrpc-lambda (&key code message data)
+                           (funcall error-callback code
+                                    (if data
+                                        (format "%s\nError data: %s" message data)
+                                      message)))))
 
 (defun mcp-async-list-prompts (connection &optional callback error-callback)
   "Get list of prompts from the MCP server using the provided CONNECTION.
