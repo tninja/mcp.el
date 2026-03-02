@@ -970,6 +970,20 @@ Returns a plist of argument names and values ready for tool invocation."
                               (when (> need-length 0)
                                 (make-list need-length nil)))))))
 
+(defun mcp--server-not-connected-message (name)
+  "Return a detailed error message when server NAME is not connected.
+Includes server stderr output when available to aid debugging."
+  (let* ((stderr-buf (get-buffer (format "*%s stderr*" name)))
+         (stderr-output (when stderr-buf
+                          (with-current-buffer stderr-buf
+                            (let ((s (buffer-string)))
+                              (unless (string-empty-p (string-trim s))
+                                (string-trim s)))))))
+    (if stderr-output
+        (format "Error: %s server not connected\nServer error output:\n%s"
+                name stderr-output)
+      (format "Error: %s server not connected" name))))
+
 ;;;###autoload
 (defun mcp-make-text-tool (name tool-name &optional asyncp)
   "Create a `gptel' tool with the given NAME, TOOL-NAME, and ASYNCP.
@@ -994,19 +1008,24 @@ the response to extract and return text content."
                          (when (< (length args) (length required))
                            (error "Error: args not match: %s -> %s" required args))
                          (if-let* ((connection (gethash name mcp-server-connections)))
-                             (mcp-async-call-tool connection
-                                                  tool-name
-                                                  (mcp--generate-tool-call-args args properties)
-                                                  (lambda (res)
-                                                    (funcall callback
-                                                             (mcp--parse-tool-call-result res)))
-                                                  (lambda (code message)
-                                                    (funcall callback
-                                                             (format "call %s tool error with %s: %s"
-                                                                     tool-name
-                                                                     code
-                                                                     message))))
-                           (error "Error: %s server not connect" name)))
+                             (condition-case err
+                                 (mcp-async-call-tool connection
+                                                      tool-name
+                                                      (mcp--generate-tool-call-args args properties)
+                                                      (lambda (res)
+                                                        (funcall callback
+                                                                 (mcp--parse-tool-call-result res)))
+                                                      (lambda (code message)
+                                                        (funcall callback
+                                                                 (format "call %s tool error with %s: %s"
+                                                                         tool-name
+                                                                         code
+                                                                         message))))
+                               (error
+                                (funcall callback
+                                         (format "Error: call %s tool failed: %s"
+                                                 tool-name (error-message-string err)))))
+                           (funcall callback (mcp--server-not-connected-message name))))
                      (lambda (&rest args)
                        (when (< (length args) (length required))
                          (error "Error: args not match: %s -> %s" required args))
@@ -1016,7 +1035,7 @@ the response to extract and return text content."
                                                          (mcp--generate-tool-call-args args properties))))
                                (mcp--parse-tool-call-result res)
                              (error "Error: call %s tool error" tool-name))
-                         (error "Error: %s server not connect" name))))
+                         (error "%s" (mcp--server-not-connected-message name)))))
          :name tool-name
          :async asyncp
          :description description
