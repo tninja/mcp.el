@@ -934,16 +934,21 @@ Returns a list of parsed argument plists."
 RES is a plist representing the tool call result.
 
 The function extracts text content from the result, concatenating it into
-a single string if multiple text entries are present.
+a single string if multiple text entries are present.  When the result
+indicates an error (\\=`:isError' is non-nil), the returned string is
+prefixed with an error marker so callers can surface it to the user.
 
 Returns the concatenated text or nil if no text content is found."
-  (string-join
-   (cl-remove-if #'null
-                 (mapcar (lambda (content)
-                           (when (string= "text" (plist-get content :type))
-                             (plist-get content :text)))
-                         (plist-get res :content)))
-   "\n"))
+  (let ((text (string-join
+               (cl-remove-if #'null
+                             (mapcar (lambda (content)
+                                       (when (string= "text" (plist-get content :type))
+                                         (plist-get content :text)))
+                                     (plist-get res :content)))
+               "\n")))
+    (if (plist-get res :isError)
+        (format "Tool error: %s" text)
+      text)))
 
 (defun mcp--generate-tool-call-args (args properties)
   "Generate tool call arguments from ARGS and PROPERTIES.
@@ -1296,8 +1301,11 @@ ERROR-CALLBACK is a function to call on error."
                          (lambda (res)
                            (funcall callback res))
                          :error-fn
-                         (jsonrpc-lambda (&key code message _data)
-                           (funcall error-callback code message))))
+                         (jsonrpc-lambda (&key code message data)
+                           (funcall error-callback code
+                                    (if data
+                                        (format "%s\nError data: %s" message data)
+                                      message)))))
 
 (defun mcp-async-list-prompts (connection &optional callback error-callback)
   "Get list of prompts from the MCP server using the provided CONNECTION.
